@@ -225,31 +225,19 @@ async function buildTrinityData(sym) {
   let chainRows = null;
 
   if (isLive) {
-    // Use the nearest expiration (same one the chain panel uses for this ticker)
-    let exp = (sym === heatTicker && curTicker === sym && curExp) ? curExp : null;
-
-    // If no exp cached, fetch the nearest one
-    if (!exp) {
+    // Trinity aggregates across the nearest 4 expirations to get real GEX walls.
+    // Single-expiry data misses the majority of open interest.
+    const cacheKey = sym + '|multi4';
+    const cached   = trinityChainCache[cacheKey];
+    if (cached && (Date.now() - cached.fetchedAt) < 60000) {
+      chainRows = cached.rows;
+    } else {
       try {
-        const exps = await polyExpirations(sym);
-        exp = exps[0] || null;
-      } catch(e) {}
-    }
-
-    if (exp) {
-      const cacheKey = sym + '|' + exp;
-      const cached   = trinityChainCache[cacheKey];
-      // Use cache if < 60s old
-      if (cached && (Date.now() - cached.fetchedAt) < 60000) {
-        chainRows = cached.rows;
-      } else {
-        try {
-          chainRows = await polyChain(sym, exp);
-          if (chainRows && chainRows.length) {
-            trinityChainCache[cacheKey] = { rows: chainRows, fetchedAt: Date.now() };
-          }
-        } catch(e) { chainRows = null; }
-      }
+        chainRows = await polyChainMultiExp(sym, 4);
+        if (chainRows && chainRows.length) {
+          trinityChainCache[cacheKey] = { rows: chainRows, fetchedAt: Date.now() };
+        }
+      } catch(e) { chainRows = null; }
     }
   }
 
@@ -402,10 +390,14 @@ async function renderTrinity() {
   const td = await buildTrinityData(heatTicker);
   const { price, nodes } = td;
 
-  // Update header to show data source
-  const expLabel  = (heatTicker === curTicker && curExp) ? fmtExpLabel(curExp) : 'nearest exp';
-  const srcLabel  = isLive ? `live · polygon.io · ${expLabel}` : `simulated · ${expLabel}`;
-  const srcEl     = document.getElementById('chainSource');
+  // ── Diagnostic banner: shows exactly what data is driving the table ──
+  const liveRows   = nodes.length;
+  const gammaSum   = nodes.reduce((s,n) => s + Math.abs(n.gex), 0);
+  const hasRealData = gammaSum > 10;  // if GEX is all zeros, greeks didn't come back
+  const srcLabel   = isLive
+    ? `live · polygon.io · ${liveRows} strikes · price $${price.toFixed(2)}` + (hasRealData ? '' : ' · ⚠ greeks empty — using BS approx')
+    : `simulated · ${liveRows} strikes · price $${price.toFixed(2)}`;
+  const srcEl = document.getElementById('chainSource');
   if (srcEl) srcEl.textContent = srcLabel;
 
   const maxGex   = Math.max(...nodes.map(n => Math.abs(n.gex)))    || 1;
@@ -439,6 +431,11 @@ async function renderTrinity() {
     </tr>`;
 
   let html = '';
+  // Warn if greeks are all zero (Polygon plan doesn't include them)
+  if (!hasRealData && isLive) {
+    html += `<tr><td colspan="12" style="padding:8px 16px;font-size:11px;font-family:var(--mono);background:rgba(255,176,32,.08);color:var(--amber);border-bottom:1px solid rgba(255,176,32,.2)">
+      ⚠ Polygon greeks not available on this plan — values computed via Black-Scholes approximation using live IV + OI. Upgrade to Polygon Starter ($29/mo) for native greeks.
+    </td></tr>`;\n  }
   for (const n of nodes) {
     const isAtm  = Math.abs(n.strike - price) < td.step * 0.7;
     const isKing = n.isKing;
