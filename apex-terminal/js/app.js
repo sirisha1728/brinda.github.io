@@ -27,6 +27,34 @@ function switchPanel(panel, btn) {
     if (nexusSignalCache.length) { renderNexusSidebar(); renderNexusMain(); }
     else refreshNexus();
   }
+  if (panel === 'charts') {
+    // Sync chart ticker to current active ticker
+    chartTicker = curTicker;
+    const btn = document.querySelector(`#chart-ticker-btns .exp-btn[onclick*="'${curTicker}'"]`);
+    document.querySelectorAll('#chart-ticker-btns .exp-btn').forEach(b => b.classList.remove('active'));
+    if (btn) btn.classList.add('active');
+    renderCharts();
+  }
+}
+
+// ═══════════════════════════════════════════
+//  PROVIDER SWITCHING
+// ═══════════════════════════════════════════
+function onProviderChange() {
+  const sel = document.getElementById('providerSel');
+  if (sel) provider = sel.value;
+  const placeholders = {
+    polygon:    'API key (polygon pre-configured)',
+    marketdata: 'MarketData.app API key',
+    tradier:    'Tradier API key',
+  };
+  const inp = document.getElementById('apiKeyInput');
+  if (inp) inp.placeholder = placeholders[provider] || 'API key';
+  // If we already have a key for this provider, auto-connect
+  if (apiKeys[provider] && !isLive) {
+    toast('Switching to ' + PROVIDER_LABELS[provider] + '...');
+    autoConnect();
+  }
 }
 
 // ═══════════════════════════════════════════
@@ -40,7 +68,7 @@ async function refreshPrices() {
         ...TICKERS.filter(t => t !== 'SPX'),
         ...HEAT_TICKERS.filter(t => t !== 'SPX'),
       ])];
-      const prices = await polySnapshotAll(allSyms);
+      const prices = await getSnapshotAll(allSyms);
       for (const [sym, pd] of Object.entries(prices)) {
         priceCache[sym] = pd;
         updateTickerBtn(sym, pd);

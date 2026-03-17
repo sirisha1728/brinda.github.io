@@ -226,24 +226,53 @@ async function buildTrinityData(sym) {
 
   if (isLive) {
     // Trinity aggregates across the nearest 4 expirations to get real GEX walls.
-    // Single-expiry data misses the majority of open interest.
     const cacheKey = sym + '|multi4';
     const cached   = trinityChainCache[cacheKey];
     if (cached && (Date.now() - cached.fetchedAt) < 60000) {
       chainRows = cached.rows;
     } else {
+      let fetchError = null;
       try {
         chainRows = await polyChainMultiExp(sym, 4);
         if (chainRows && chainRows.length) {
           trinityChainCache[cacheKey] = { rows: chainRows, fetchedAt: Date.now() };
         }
-      } catch(e) { chainRows = null; }
+      } catch(e) {
+        fetchError = e.message;
+        chainRows = null;
+      }
+
+      // If multi-exp failed, try single nearest expiry
+      if (!chainRows || !chainRows.length) {
+        try {
+          const exps = await getExpirations(sym);
+          const exp  = exps[0];
+          if (exp) {
+            chainRows = await getChain(sym, exp);
+            if (chainRows?.length) {
+              trinityChainCache[cacheKey] = { rows: chainRows, fetchedAt: Date.now() };
+            }
+          }
+        } catch(e2) { fetchError = (fetchError || '') + ' | ' + e2.message; }
+      }
+
+      // Surface the error in the UI toolbar
+      if ((!chainRows || !chainRows.length) && fetchError) {
+        const srcEl = document.getElementById('chainSource');
+        if (srcEl) srcEl.textContent = '⚠ fetch failed: ' + fetchError + ' — using mock';
+      }
     }
   }
 
-  // Fall back to mock if live fetch failed or offline
+  // Fall back through: mock → synthetic BS chain
   if (!chainRows || !chainRows.length) {
-    chainRows = mockChain(sym, '');
+    if (isLive) {
+      // Build a synthetic chain using Black-Scholes around the live price.
+      // No real OI data, but correct strikes, realistic greeks, and correct ATM/King.
+      chainRows = buildSyntheticChain(price, step);
+    } else {
+      chainRows = mockChain(sym, '');
+    }
   }
 
   // --- Derive Trinity metrics from each strike row ---
@@ -390,15 +419,17 @@ async function renderTrinity() {
   const td = await buildTrinityData(heatTicker);
   const { price, nodes } = td;
 
-  // ── Diagnostic banner: shows exactly what data is driving the table ──
-  const liveRows   = nodes.length;
-  const gammaSum   = nodes.reduce((s,n) => s + Math.abs(n.gex), 0);
-  const hasRealData = gammaSum > 10;  // if GEX is all zeros, greeks didn't come back
-  const srcLabel   = isLive
-    ? `live · polygon.io · ${liveRows} strikes · price $${price.toFixed(2)}` + (hasRealData ? '' : ' · ⚠ greeks empty — using BS approx')
-    : `simulated · ${liveRows} strikes · price $${price.toFixed(2)}`;
+  // ── Diagnostic banner ──
+  const liveRows    = nodes.length;
+  const totalOI     = nodes.reduce((s,n) => s + n.callOI + n.putOI, 0);
+  const hasRealOI   = totalOI > 1000;   // synthetic chain has low/zero OI
+  const gammaSum    = nodes.reduce((s,n) => s + Math.abs(n.gex), 0);
+  const hasRealData = gammaSum > 10;
+  const dataLabel   = !isLive            ? 'mock data'
+                    : !hasRealOI         ? `synthetic BS · live price $${price.toFixed(2)} · no options subscription`
+                    :                      `live · polygon.io · ${liveRows} strikes · $${price.toFixed(2)}`;
   const srcEl = document.getElementById('chainSource');
-  if (srcEl) srcEl.textContent = srcLabel;
+  if (srcEl) srcEl.textContent = dataLabel;
 
   const maxGex   = Math.max(...nodes.map(n => Math.abs(n.gex)))    || 1;
   const maxVanna = Math.max(...nodes.map(n => Math.abs(n.vanna)))  || 1;
@@ -431,11 +462,16 @@ async function renderTrinity() {
     </tr>`;
 
   let html = '';
-  // Warn if greeks are all zero (Polygon plan doesn't include them)
-  if (!hasRealData && isLive) {
+  // Show data source status banner
+  if (isLive && !hasRealOI) {
     html += `<tr><td colspan="12" style="padding:8px 16px;font-size:11px;font-family:var(--mono);background:rgba(255,176,32,.08);color:var(--amber);border-bottom:1px solid rgba(255,176,32,.2)">
-      ⚠ Polygon greeks not available on this plan — values computed via Black-Scholes approximation using live IV + OI. Upgrade to Polygon Starter ($29/mo) for native greeks.
-    </td></tr>`;\n  }
+      ⚠ Options chain data requires a Polygon.io plan with options access. Showing synthetic Black-Scholes nodes centred on live price $${price.toFixed(2)}. GEX structure is mathematically correct but OI values are estimated. <a href="https://polygon.io/dashboard/stocks/subscribe" target="_blank" style="color:var(--accent)">Upgrade at polygon.io →</a>
+    </td></tr>`;
+  } else if (isLive && !hasRealData) {
+    html += `<tr><td colspan="12" style="padding:6px 16px;font-size:11px;font-family:var(--mono);background:rgba(255,176,32,.06);color:var(--amber);border-bottom:1px solid rgba(255,176,32,.15)">
+      ℹ Polygon greeks empty on this plan — delta/gamma computed via Black-Scholes approximation.
+    </td></tr>`;
+  }
   for (const n of nodes) {
     const isAtm  = Math.abs(n.strike - price) < td.step * 0.7;
     const isKing = n.isKing;

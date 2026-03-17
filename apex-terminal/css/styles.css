@@ -461,3 +461,10 @@ table.trinity-tbl { width:100%; border-collapse:collapse; font-family:var(--mono
 }
 .depth-atm td { background:rgba(253,224,71,.06) !important; }
 .depth-atm .depth-strike { color:var(--yellow) !important; }
+
+/* ── CHARTS PANEL ── */
+#panel-charts { display:none; flex-direction:column; }
+#panel-charts.active { display:flex; }
+#tv-chart-wrap { flex:1; min-height:0; overflow:hidden; background:var(--bg1); }
+#tv-chart-container { width:100%; height:100%; }
+#tv-chart-container iframe { width:100%; height:100%; border:none; display:block; }

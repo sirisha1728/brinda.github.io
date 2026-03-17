@@ -187,7 +187,7 @@ function startFlowRESTPoll() {
     setFlowStatus(session === 'closed' ? 'closed' : 'polling');
     for (const sym of FLOW_WATCH.slice(0, 5)) { // limit to 5 to avoid rate limit
       try {
-        const trades = await polyFetchRecentOptionTrades(sym, 20);
+        const trades = await fetchFlowTrades(sym);
         let gotNew = false;
         for (const t of trades) {
           const row = classifyTrade(t);
@@ -218,7 +218,7 @@ function startFlowEngine() {
   setTimeout(async () => {
     for (const sym of FLOW_WATCH.slice(0, 4)) {
       try {
-        const trades = await polyFetchRecentOptionTrades(sym, 30);
+        const trades = await fetchFlowTrades(sym);
         for (const t of trades) ingestFlowRow(classifyTrade(t));
       } catch(e) {}
     }

@@ -170,7 +170,7 @@ async function renderChain() {
     priceCache[curTicker] = pd;
 
     let exps;
-    if (isLive) { try { exps = await polyExpirations(curTicker); } catch(e) { exps = mockExps(curTicker); } }
+    if (isLive) { try { exps = await getExpirations(curTicker); } catch(e) { exps = mockExps(curTicker); } }
     else exps = mockExps(curTicker);
     if (!exps.length) exps = mockExps(curTicker);
 
@@ -178,7 +178,7 @@ async function renderChain() {
     renderExpButtons(exps);
 
     let rows;
-    if (isLive) { try { rows = await polyChain(curTicker, curExp); } catch(e) { rows = null; } }
+    if (isLive) { try { rows = await getChain(curTicker, curExp); } catch(e) { rows = null; } }
     if (!rows || !rows.length) rows = mockChain(curTicker, curExp);
 
     document.getElementById('chainSource').textContent = isLive ? 'live · polygon.io' : 'simulated data';
