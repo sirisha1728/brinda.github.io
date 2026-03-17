@@ -2,7 +2,10 @@
 //  HEATSEEKER — GEX Visualization
 // ═══════════════════════════════════════════
 function buildHeatData(sym) {
-  const price = (priceCache[sym]||MOCK_PRICES[sym]||{p:200}).p;
+  // Use priceCache which is kept fresh by setHeatTicker + refreshPrices
+  // Do NOT fall back to MOCK_PRICES if live — stale mock will give wrong strikes
+  const cached = priceCache[sym];
+  const price  = (cached && cached.p > 0) ? cached.p : (MOCK_PRICES[sym]||{p:200}).p;
   const step  = price<100?1:price<300?5:price<700?10:25;
   const center= Math.round(price/step)*step;
   const nodes = [];
@@ -129,7 +132,7 @@ function renderHeatCanvas() {
 function buildHeatTickerList() {
   let html='';
   for(const sym of HEAT_TICKERS){
-    const pd=priceCache[sym]||MOCK_PRICES[sym]||{p:0,c:0,pct:0};
+    const pd=(priceCache[sym]?.p>0)?priceCache[sym]:(MOCK_PRICES[sym]||{p:0,c:0,pct:0});
     const up=pd.pct>=0;
     html+=`<div class="heat-ticker-item${sym===heatTicker?' active':''}" onclick="setHeatTicker('${sym}',this)">
       <span class="ht-sym">${sym}</span>
@@ -142,15 +145,36 @@ function buildHeatTickerList() {
   document.getElementById('heatTickerList').innerHTML=html;
 }
 
-function setHeatTicker(sym, el) {
-  heatTicker=sym;
-  document.querySelectorAll('.heat-ticker-item').forEach(e=>e.classList.remove('active'));
-  if(el) el.classList.add('active');
-  const pd=priceCache[sym]||MOCK_PRICES[sym]||{p:0,pct:0};
-  document.getElementById('heatTicker').textContent=sym;
-  document.getElementById('heatPrice').textContent='$'+(pd.p||0).toFixed(2);
-  heatData=buildHeatData(sym);
-  if(heatMode==='trinity') renderTrinity();  // async
+async function setHeatTicker(sym, el) {
+  heatTicker = sym;
+  document.querySelectorAll('.heat-ticker-item').forEach(e => e.classList.remove('active'));
+  if (el) el.classList.add('active');
+
+  // ── Always fetch a fresh price before building any data ──
+  // Initial display value while live fetch runs (overwritten immediately below)
+  let pd = (priceCache[sym]?.p > 0) ? priceCache[sym] : (MOCK_PRICES[sym] || { p: 0, pct: 0 });
+  if (isLive) {
+    try {
+      const fresh = await getExtendedQuote(sym);
+      priceCache[sym] = fresh;
+      pd = fresh;
+      updateTickerBtn(sym, fresh);
+    } catch(e) {
+      // getExtendedQuote failed — try snapshot fallback
+      try {
+        const snap = await polyPrevClose(sym);
+        priceCache[sym] = snap;
+        pd = snap;
+        updateTickerBtn(sym, snap);
+      } catch(e2) { /* use cache */ }
+    }
+  }
+
+  document.getElementById('heatTicker').textContent = sym;
+  document.getElementById('heatPrice').textContent  = '$' + (pd.p || 0).toFixed(2);
+
+  heatData = buildHeatData(sym);
+  if (heatMode === 'trinity') renderTrinity();  // async
   else renderHeatCanvas();
 }
 
@@ -192,7 +216,9 @@ function setHeatMode(mode, btn) {
 let trinityChainCache = {};   // { sym+exp: { nodes, fetchedAt } }
 
 async function buildTrinityData(sym) {
-  const price = (priceCache[sym] || MOCK_PRICES[sym] || { p: 200 }).p;
+  // Use the freshest available price — setHeatTicker fetches before calling this
+  const cached = priceCache[sym];
+  const price  = (cached && cached.p > 0) ? cached.p : (MOCK_PRICES[sym]||{ p: 200 }).p;
   const step  = price < 100 ? 1 : price < 300 ? 5 : price < 700 ? 10 : 25;
 
   // --- Load chain rows (live or mock) ---

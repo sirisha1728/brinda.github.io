@@ -20,8 +20,20 @@ async function buildLiveNexusSignals() {
       const snap  = snapD.ticker;
       if (!snap) continue;
 
-      const price = +(snap.lastTrade?.p || snap.day?.c || 0).toFixed(2);
-      const pct   = +(snap.todaysChangePerc || 0).toFixed(2);
+      const sess      = marketSession();
+      const prevClose = +(snap.prevDay?.c || 0).toFixed(2);
+      const dayClose  = +(snap.day?.c    || 0).toFixed(2);
+      const lastTrade = +(snap.lastTrade?.p || dayClose || prevClose).toFixed(2);
+      const price     = lastTrade > 0 ? lastTrade : dayClose > 0 ? dayClose : prevClose;
+      const pct       = prevClose > 0 ? +((price - prevClose) / prevClose * 100).toFixed(2) : 0;
+      const change    = +(price - prevClose).toFixed(2);
+      // Update priceCache so all tabs see the latest price from Nexus's fetch
+      priceCache[sym] = {
+        p: price, c: change, pct,
+        prevClose, extPrice: (sess === 'pre' || sess === 'after') ? lastTrade : null,
+        session: sess, fetchedAt: Date.now(),
+      };
+      updateTickerBtn(sym, priceCache[sym]);
       const vol   = snap.day?.v || 0;
       const avgVol = snap.prevDay?.v || vol;  // rough proxy for avg vol
 
@@ -103,7 +115,7 @@ async function buildLiveNexusSignals() {
 
     } catch(e) {
       // Fallback: use price-only signal
-      const pd = priceCache[sym] || MOCK_PRICES[sym] || { p: 0, pct: 0 };
+      const pd = (priceCache[sym]?.p > 0) ? priceCache[sym] : (MOCK_PRICES[sym] || { p: 0, pct: 0 });
       const score = Math.round(Math.min(99, Math.max(1, 50 + pd.pct * 8)));
       signals.push({
         ticker: sym, score,
@@ -129,7 +141,7 @@ function renderNexusSidebar(signals) {
   let html = '';
   for (let i = 0; i < list.length; i++) {
     const s = list[i];
-    const pd = priceCache[s.ticker] || MOCK_PRICES[s.ticker] || { p: 0, pct: 0 };
+    const pd = (priceCache[s.ticker]?.p > 0) ? priceCache[s.ticker] : (MOCK_PRICES[s.ticker] || { p: 0, pct: 0 });
     const up = pd.pct >= 0;
     html += `<div class="nsig${i === nexusActive ? ' active' : ''}" onclick="setNexusActive(${i},this)">
       <div class="nsig-head">
@@ -158,7 +170,9 @@ function renderNexusMain() {
   const signals = nexusSignalCache.length ? nexusSignalCache : NEXUS_SIGNALS_FALLBACK;
   if (!signals.length) return;
   const s  = signals[Math.min(nexusActive, signals.length - 1)];
-  const pd = priceCache[s.ticker] || MOCK_PRICES[s.ticker] || { p: 0, c: 0, pct: 0 };
+  // Use the freshest price — cache is kept live by refreshPrices + warmCache
+  const pd = (priceCache[s.ticker]?.p > 0) ? priceCache[s.ticker]
+           : (MOCK_PRICES[s.ticker] || { p: 0, c: 0, pct: 0 });
   const up = pd.pct >= 0;
 
   const gexW = { Bullish:78, Positive:63, Flat:50, Negative:32, Bearish:18 }[s.gex] || 50;

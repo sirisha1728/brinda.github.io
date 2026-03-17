@@ -17,7 +17,12 @@ function startPriceWS() {
       let events; try { events = JSON.parse(msg.data); } catch(e) { return; }
       for (const ev of events) {
         if (ev.ev === 'status' && ev.status === 'auth_success') {
-          const subs = TICKERS.filter(t => t !== 'SPX').map(t => `T.${t}`).join(',');
+          // Subscribe to all ticker bar + heat tickers for complete live coverage
+          const wsSyms = [...new Set([
+            ...TICKERS.filter(t => t !== 'SPX'),
+            ...HEAT_TICKERS.filter(t => t !== 'SPX'),
+          ])];
+          const subs = wsSyms.map(t => `T.${t}`).join(',');
           priceWS.send(JSON.stringify({ action: 'subscribe', params: subs }));
           priceWSRetries = 0;
         }
@@ -25,16 +30,16 @@ function startPriceWS() {
         if (ev.ev === 'T' && ev.sym) {
           const sym = ev.sym;
           const p   = ev.p;
-          const prev = priceCache[sym]?.p || MOCK_PRICES[sym]?.p || p;
-          const c   = +(p - (MOCK_PRICES[sym]?.p || p)).toFixed(2);
-          const pct = prev > 0 ? +((p - prev) / prev * 100).toFixed(2) : 0;
-          // Smooth update: only update if price actually changed
           if (priceCache[sym] && Math.abs(p - priceCache[sym].p) < 0.001) continue;
-          const prevClose = MOCK_PRICES[sym]?.p || p;
+          // Use real prevClose from cache (set by warmCache/refreshPrices), not mock
+          const prevClose = priceCache[sym]?.prevClose || priceCache[sym]?.p || p;
           priceCache[sym] = {
+            ...( priceCache[sym] || {} ),
             p,
-            c:   +(p - prevClose).toFixed(2),
-            pct: +((p - prevClose) / prevClose * 100).toFixed(2)
+            c:         +(p - prevClose).toFixed(2),
+            pct:       prevClose > 0 ? +((p - prevClose) / prevClose * 100).toFixed(2) : 0,
+            prevClose, // preserve real prevClose for subsequent ticks
+            fetchedAt: Date.now(),
           };
           updateTickerBtn(sym, priceCache[sym]);
           // Flash the ticker
@@ -160,7 +165,8 @@ async function renderChain() {
   document.getElementById('chainBody').innerHTML = '<tr><td colspan="13" class="loader">Loading options chain...</td></tr>';
   document.getElementById('chainErr').innerHTML = '';
   try {
-    const pd = priceCache[curTicker] || await getPrice(curTicker);
+    // Always fetch fresh price when rendering chain — stale cache = wrong ATM row
+    const pd = await getPrice(curTicker);
     priceCache[curTicker] = pd;
 
     let exps;
@@ -264,8 +270,13 @@ async function renderDepth() {
   if (!el) return;
   el.innerHTML = '<div class="loader">Loading depth data...</div>';
 
-  const sym   = curTicker;
-  const pd    = priceCache[sym] || MOCK_PRICES[sym] || { p: 200 };
+  const sym = curTicker;
+  // Fetch fresh price so depth strikes are centred on actual market price
+  let pd = priceCache[sym];
+  if (isLive && (!pd || !pd.p || (Date.now() - (pd.fetchedAt||0)) > 60000)) {
+    try { pd = await getPrice(sym); priceCache[sym] = pd; } catch(e) {}
+  }
+  pd = pd || MOCK_PRICES[sym] || { p: 200 };
   const price = pd.p;
 
   // Fetch live OI by strike from nearest 2 expirations
