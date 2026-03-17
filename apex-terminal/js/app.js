@@ -17,7 +17,12 @@ function switchPanel(panel, btn) {
     renderFlow();
     if (!isLive) setFlowStatus('mock');
   }
-  if (panel === 'heat')  { buildHeatTickerList(); setHeatTicker(heatTicker, null); }
+  if (panel === 'heat')  {
+    // Sync HeatSeeker ticker to whatever's active in FlowChain
+    if (curTicker && curTicker !== heatTicker) heatTicker = curTicker;
+    buildHeatTickerList();
+    setHeatTicker(heatTicker, null);
+  }
   if (panel === 'nexus') {
     if (nexusSignalCache.length) { renderNexusSidebar(); renderNexusMain(); }
     else refreshNexus();

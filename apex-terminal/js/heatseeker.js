@@ -142,7 +142,7 @@ function setHeatTicker(sym, el) {
   document.getElementById('heatTicker').textContent=sym;
   document.getElementById('heatPrice').textContent='$'+(pd.p||0).toFixed(2);
   heatData=buildHeatData(sym);
-  if(heatMode==='trinity') renderTrinity();
+  if(heatMode==='trinity') renderTrinity();  // async
   else renderHeatCanvas();
 }
 
@@ -156,7 +156,7 @@ function setHeatMode(mode, btn) {
     document.getElementById('trinityWrap').style.display='flex';
     document.getElementById('heatLegend').style.display='none';
     document.getElementById('trinityLegend').style.display='flex';
-    renderTrinity();
+    renderTrinity();   // async — intentionally not awaited here
   } else {
     document.getElementById('singleCanvasWrap').style.display='';
     document.getElementById('trinityWrap').style.display='none';
@@ -169,87 +169,154 @@ function setHeatMode(mode, btn) {
 // ═══════════════════════════════════════════
 //  TRINITY MODE ENGINE
 // ═══════════════════════════════════════════
-function buildTrinityData(sym) {
-  const price = (priceCache[sym]||MOCK_PRICES[sym]||{p:200}).p;
-  const step = price<100?1:price<300?5:price<700?10:25;
-  const center = Math.round(price/step)*step;
+// ═══════════════════════════════════════════
+//  BUILD TRINITY DATA FROM LIVE CHAIN
+// ═══════════════════════════════════════════
+// Trinity derives all 4 metrics from real options chain data:
+//   GEX   = gamma * OI * 100 * spot  (per contract, summed call-put)
+//   Vanna = vanna proxy: delta * IV * OI  (how IV changes shift dealer delta)
+//   Charm = theta proxy: delta * (1 - |delta|) * OI  (time decay drift)
+//   DEX   = delta * OI * 100  (net dealer delta hedge requirement)
+//   Flow  = volume * mid_price * 100  (call premium - put premium)
+//
+// Falls back to mockChain when offline.
+
+let trinityChainCache = {};   // { sym+exp: { nodes, fetchedAt } }
+
+async function buildTrinityData(sym) {
+  const price = (priceCache[sym] || MOCK_PRICES[sym] || { p: 200 }).p;
+  const step  = price < 100 ? 1 : price < 300 ? 5 : price < 700 ? 10 : 25;
+
+  // --- Load chain rows (live or mock) ---
+  let chainRows = null;
+
+  if (isLive) {
+    // Use the nearest expiration (same one the chain panel uses for this ticker)
+    let exp = (sym === heatTicker && curTicker === sym && curExp) ? curExp : null;
+
+    // If no exp cached, fetch the nearest one
+    if (!exp) {
+      try {
+        const exps = await polyExpirations(sym);
+        exp = exps[0] || null;
+      } catch(e) {}
+    }
+
+    if (exp) {
+      const cacheKey = sym + '|' + exp;
+      const cached   = trinityChainCache[cacheKey];
+      // Use cache if < 60s old
+      if (cached && (Date.now() - cached.fetchedAt) < 60000) {
+        chainRows = cached.rows;
+      } else {
+        try {
+          chainRows = await polyChain(sym, exp);
+          if (chainRows && chainRows.length) {
+            trinityChainCache[cacheKey] = { rows: chainRows, fetchedAt: Date.now() };
+          }
+        } catch(e) { chainRows = null; }
+      }
+    }
+  }
+
+  // Fall back to mock if live fetch failed or offline
+  if (!chainRows || !chainRows.length) {
+    chainRows = mockChain(sym, '');
+  }
+
+  // --- Derive Trinity metrics from each strike row ---
   const nodes = [];
+  for (const row of chainRows) {
+    const { strike, c, p } = row;
+    const atm = Math.abs(strike - price) < step * 0.7;
 
-  // Seeded structure for consistency
-  for(let i=-12;i<=12;i++){
-    const strike = center+i*step;
-    const dist = (strike-price)/price; // signed distance
-    const absDist = Math.abs(dist);
+    // GEX: gamma * OI * 100 * spot  (calls positive / puts negative for dealer)
+    // Dealers are short calls → long gamma on calls, short gamma on puts
+    const callGex =  (c.gamma || 0) * (c.oi || 0) * 100 * price;
+    const putGex  = -(p.gamma || 0) * (p.oi || 0) * 100 * price;
+    const gex     = callGex + putGex;
 
-    // GEX — yellow=pin(neg), purple=explode(pos)
-    let gex;
-    if(i===2)       gex = -(r(9000,15000));   // King node — Pika
-    else if(i===-3) gex = r(5500,9000);        // Barney
-    else if(i===6)  gex = -(r(3000,6000));     // Secondary pika
-    else if(i===-6) gex = r(2000,4500);        // Secondary barney
-    else            gex = (Math.random()-.52)*r(400,3500)*(1/(absDist*8+1));
+    // Vanna: approximated as delta * iv * oi
+    // Positive vanna → IV increase pushes dealer to buy more stock (bullish)
+    const callVanna =  (c.delta || 0) * (c.iv || 0) * (c.oi || 0);
+    const putVanna  =  (p.delta || 0) * (p.iv || 0) * (p.oi || 0);  // put delta is negative
+    const vanna     = (callVanna + putVanna) * 100;
 
-    // Vanna — positive = IV rise pushes delta up (bullish), negative = bearish
-    // Vanna peaks at ~0.15-0.25 OTM strikes
-    let vanna;
-    const vannaSign = dist>0?1:-1; // calls OTM have +vanna, puts OTM have -vanna
-    if(absDist>0.005 && absDist<0.08)
-      vanna = vannaSign * r(1500,5000) * (1 - absDist/0.08);
-    else if(absDist>=0.08 && absDist<0.18)
-      vanna = vannaSign * r(500,2000) * (0.5 - (absDist-0.08)/0.1*0.5);
-    else
-      vanna = (Math.random()-.5)*r(100,800);
+    // Charm: delta * (1 - |delta|) * OI — time-decay induced delta drift
+    // Near-ATM contracts have highest charm; decays toward 0 deep ITM/OTM
+    const callCharm =  (c.delta || 0) * (1 - Math.abs(c.delta || 0)) * (c.oi || 0);
+    const putCharm  =  (p.delta || 0) * (1 - Math.abs(p.delta || 0)) * (p.oi || 0);
+    const charm     = (callCharm + putCharm) * 1000;
 
-    // Charm — time decay delta drift; negative at calls, positive at puts near ATM
-    const charm = -vannaSign * r(200,1800) * Math.exp(-absDist*15) + (Math.random()-.5)*400;
+    // DEX: net dealer delta exposure = delta * OI * 100
+    // Dealers are short calls (negative delta to hedge) and short puts (positive)
+    const callDex = -(c.delta || 0) * (c.oi || 0) * 100;  // dealer is short calls
+    const putDex  =  Math.abs(p.delta || 0) * (p.oi || 0) * 100;  // dealer is short puts
+    const dex     = callDex + putDex;
 
-    // Delta exposure — net dealer delta hedge requirement
-    let dex;
-    if(i===2)       dex = r(6000,10000);     // Long delta needed (dealers short calls)
-    else if(i===-3) dex = -r(4000,8000);     // Short delta needed
-    else            dex = (Math.random()-.45)*r(500,4000)*(1/(absDist*6+1));
+    // Net Flow: (call premium - put premium) from today's volume
+    const callMid  = ((c.bid || 0) + (c.ask || 0)) / 2;
+    const putMid   = ((p.bid || 0) + (p.ask || 0)) / 2;
+    const callFlow = callMid * (c.vol || 0) * 100;
+    const putFlow  = putMid  * (p.vol || 0) * 100;
+    const netFlow  = callFlow - putFlow;
 
-    // Net flow — premium in bull vs bear orders
-    const flowBull = r(50,500) * (1/(absDist*5+1)) * (Math.random()>.4?1.5:0.5);
-    const flowBear = r(50,500) * (1/(absDist*5+1)) * (Math.random()>.4?1.5:0.5);
-    const netFlow = flowBull - flowBear + (i===2?r(300,800):i===-3?-r(200,600):0);
-
-    // Composite score: weighted average of all 4 signals normalized
     nodes.push({
-      strike, i,
-      gex:+gex.toFixed(0),
-      vanna:+vanna.toFixed(0),
-      charm:+charm.toFixed(0),
-      dex:+dex.toFixed(0),
-      netFlow:+netFlow.toFixed(0),
-      isKing:i===2,
+      strike,
+      atm,
+      isKing: false,   // determined after sorting
+      gex:     +gex.toFixed(0),
+      vanna:   +vanna.toFixed(0),
+      charm:   +charm.toFixed(0),
+      dex:     +dex.toFixed(0),
+      netFlow: +netFlow.toFixed(0),
+      // raw chain values for tooltip reference
+      callOI: c.oi || 0, putOI: p.oi || 0,
+      callVol: c.vol || 0, putVol: p.vol || 0,
+      callIV: c.iv || 0, putIV: p.iv || 0,
     });
   }
 
-  // Compute composite
-  const maxG=Math.max(...nodes.map(n=>Math.abs(n.gex)));
-  const maxV=Math.max(...nodes.map(n=>Math.abs(n.vanna)));
-  const maxD=Math.max(...nodes.map(n=>Math.abs(n.dex)));
-  const maxF=Math.max(...nodes.map(n=>Math.abs(n.netFlow)));
-  nodes.forEach(n=>{
-    // composite: -1 (max bearish) to +1 (max bullish)
-    const gN = -n.gex/maxG;       // positive GEX=barney=bearish pressure
-    const vN = n.vanna/maxV;
-    const dN = n.dex/maxD;
-    const fN = n.netFlow/maxF;
-    n.composite = (gN*0.35 + vN*0.20 + dN*0.30 + fN*0.15);
+  // Mark King Node: strike with the largest absolute GEX value
+  let maxAbsGex = 0, kingIdx = 0;
+  nodes.forEach((n, i) => { if (Math.abs(n.gex) > maxAbsGex) { maxAbsGex = Math.abs(n.gex); kingIdx = i; } });
+  nodes[kingIdx].isKing = true;
+
+  // Compute composite score per node
+  const maxG = Math.max(...nodes.map(n => Math.abs(n.gex)))    || 1;
+  const maxV = Math.max(...nodes.map(n => Math.abs(n.vanna)))  || 1;
+  const maxD = Math.max(...nodes.map(n => Math.abs(n.dex)))    || 1;
+  const maxF = Math.max(...nodes.map(n => Math.abs(n.netFlow)))|| 1;
+
+  nodes.forEach(n => {
+    const gN = -n.gex    / maxG;  // negative GEX = Pika = pin = neutral/bull
+    const vN =  n.vanna  / maxV;
+    const dN =  n.dex    / maxD;
+    const fN =  n.netFlow/ maxF;
+    n.composite = gN * 0.35 + vN * 0.20 + dN * 0.30 + fN * 0.15;
   });
 
-  return {price, step, nodes};
+  return { price, step, nodes };
 }
+
 
 // Draw a single trinity sub-chart
 // ═══════════════════════════════════════════
 //  TRINITY MODE — TABLE VIEW
 // ═══════════════════════════════════════════
-function renderTrinity() {
-  const td = buildTrinityData(heatTicker);
+async function renderTrinity() {
+  // Show loading state
+  const tbody = document.getElementById('trinityTbody');
+  if (tbody) tbody.innerHTML = '<tr><td colspan="12" class="loader">Loading live chain data...</td></tr>';
+
+  const td = await buildTrinityData(heatTicker);
   const { price, nodes } = td;
+
+  // Update header to show data source
+  const expLabel  = (heatTicker === curTicker && curExp) ? fmtExpLabel(curExp) : 'nearest exp';
+  const srcLabel  = isLive ? `live · polygon.io · ${expLabel}` : `simulated · ${expLabel}`;
+  const srcEl     = document.getElementById('chainSource');
+  if (srcEl) srcEl.textContent = srcLabel;
 
   const maxGex   = Math.max(...nodes.map(n => Math.abs(n.gex)))    || 1;
   const maxVanna = Math.max(...nodes.map(n => Math.abs(n.vanna)))  || 1;
