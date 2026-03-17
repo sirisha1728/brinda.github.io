@@ -21,10 +21,13 @@
       <span class="tab-icon">⛓</span> FlowChain
     </div>
     <div class="nav-tab" onclick="switchPanel('flow',this)">
-      <span class="tab-icon">⚡</span> FlowSeeker
+      <span class="tab-icon">⚡</span> FlowSeeker<span id="flowNewBadge" style="display:none;background:#ff4560;color:#fff;font-size:9px;font-weight:700;padding:1px 5px;border-radius:9px;margin-left:5px;font-family:var(--mono)">0</span>
     </div>
     <div class="nav-tab" onclick="switchPanel('heat',this)">
       <span class="tab-icon">🔥</span> HeatSeeker
+    </div>
+    <div class="nav-tab" onclick="switchPanel('depth',this)">
+      <span class="tab-icon">≋</span> Depth
     </div>
     <div class="nav-tab" onclick="switchPanel('nexus',this)">
       <span class="tab-icon">◈</span> Nexus
@@ -32,7 +35,8 @@
   </nav>
   <div class="header-right">
     <div class="api-setup">
-      <input type="password" class="api-input" id="apiKey" placeholder="Polygon.io API key (free at polygon.io)" autocomplete="off">
+      <span id="sessionBadge" style="font-family:var(--mono);font-size:10px;color:var(--text2);padding:4px 10px;border:1px solid var(--border);border-radius:20px;white-space:nowrap">Closed</span>
+      <input type="password" class="api-input" id="apiKey" placeholder="Override API key (pre-configured)" autocomplete="off">
       <button class="connect-btn" onclick="connectAPI()">Connect</button>
     </div>
     <div class="status-pill" id="statusPill">
@@ -139,7 +143,8 @@
     <button class="chip" onclick="filterFlow('unusual',this)">Unusual</button>
     <button class="chip" onclick="filterFlow('bull',this)">Bullish</button>
     <button class="chip" onclick="filterFlow('bear',this)">Bearish</button>
-    <span style="margin-left:auto;font-size:10px;color:var(--text2);font-family:var(--mono)" id="flowCount">0 alerts</span>
+    <span id="flowCount" style="font-size:10px;color:var(--text2);font-family:var(--mono)">0 alerts</span>
+    <span id="flowStatus" style="font-size:10px;font-family:var(--mono);padding:3px 9px;border:1px solid var(--border);border-radius:3px;color:var(--text2);margin-left:8px">◌ Simulated</span>
   </div>
   <div id="flowErr"></div>
   <div class="flow-head">
@@ -196,6 +201,41 @@
         <div style="margin-left:auto;font-family:var(--mono);font-size:10px;color:var(--text2)">★ King Node · ATM = yellow row · bars = normalized intensity</div>
       </div>
     </div>
+  </div>
+</div>
+
+<!-- ── DEPTH PANEL ── -->
+<div id="panel-depth" class="panel">
+  <div class="chain-toolbar">
+    <span class="toolbar-label" id="depthTicker" style="color:var(--text0)">AAPL — Open Interest & GEX by Strike</span>
+    <span class="toolbar-label" style="margin-left:auto;font-size:9px;color:var(--text2)">±15% strikes · bars = OI magnitude</span>
+  </div>
+  <div class="chain-wrap">
+    <table class="chain" style="font-size:11px">
+      <thead>
+        <tr>
+          <th colspan="4" style="text-align:center;padding:4px;font-size:10px;color:rgba(0,212,255,.8);background:rgba(0,212,255,.04)">← CALLS</th>
+          <th style="text-align:center;background:var(--bg2);color:var(--text1);font-size:10px">STRIKE</th>
+          <th colspan="4" style="text-align:center;padding:4px;font-size:10px;color:rgba(255,69,96,.8);background:rgba(255,69,96,.04)">PUTS →</th>
+          <th style="text-align:center;font-size:10px;color:var(--text1);background:rgba(253,224,71,.05)">NET GEX</th>
+        </tr>
+        <tr>
+          <th style="text-align:right;background:rgba(0,212,255,.04);color:rgba(0,212,255,.6)">OI</th>
+          <th style="text-align:right;width:130px;background:rgba(0,212,255,.04);color:rgba(0,212,255,.5)">OI Bar</th>
+          <th style="text-align:right;width:130px;background:rgba(0,212,255,.03);color:rgba(0,212,255,.4)">Vol Bar</th>
+          <th style="text-align:right;background:rgba(0,212,255,.03);color:rgba(0,212,255,.5)">Vol</th>
+          <th class="str-h">Price</th>
+          <th style="background:rgba(255,69,96,.03);color:rgba(255,69,96,.4)">Vol</th>
+          <th style="width:130px;background:rgba(255,69,96,.03);color:rgba(255,69,96,.4)">Vol Bar</th>
+          <th style="width:130px;background:rgba(255,69,96,.04);color:rgba(255,69,96,.5)">OI Bar</th>
+          <th style="background:rgba(255,69,96,.04);color:rgba(255,69,96,.6)">OI</th>
+          <th style="background:rgba(253,224,71,.04);color:rgba(253,224,71,.7)">GEX Type</th>
+        </tr>
+      </thead>
+      <tbody id="depthBody">
+        <tr><td colspan="10" class="loader">Select a ticker to load depth</td></tr>
+      </tbody>
+    </table>
   </div>
 </div>
 

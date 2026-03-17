@@ -435,3 +435,29 @@ table.trinity-tbl { width:100%; border-collapse:collapse; font-family:var(--mono
 .toast.show { transform: translateY(0); opacity: 1; }
 .toast.success { border-color: rgba(0,232,122,.4); color: var(--green); }
 .toast.error { border-color: rgba(255,69,96,.4); color: var(--red); }
+/* ── FLOW STATUS & SESSION BADGE ── */
+#flowStatus {
+  transition: color .3s;
+  white-space: nowrap;
+}
+#sessionBadge {
+  transition: color .3s;
+  white-space: nowrap;
+}
+
+/* ── TICK FLASH ── */
+@keyframes tickFlash {
+  0%   { background: rgba(0,212,255,.18); }
+  100% { background: transparent; }
+}
+.tick-flash { animation: tickFlash .4s ease-out; }
+
+/* ── DEPTH PANEL ── */
+.depth-strike {
+  text-align:center; background:var(--bg2); font-weight:600;
+  border-left:1px solid var(--border); border-right:1px solid var(--border);
+  font-family:var(--mono); font-size:11px; color:var(--text0);
+  padding:3px 10px;
+}
+.depth-atm td { background:rgba(253,224,71,.06) !important; }
+.depth-atm .depth-strike { color:var(--yellow) !important; }
