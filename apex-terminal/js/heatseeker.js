@@ -3,25 +3,33 @@
 // ═══════════════════════════════════════════
 function buildHeatData(sym) {
   const price = (priceCache[sym]||MOCK_PRICES[sym]||{p:200}).p;
-  const step = price<100?1:price<300?5:price<700?10:25;
-  const center = Math.round(price/step)*step;
+  const step  = price<100?1:price<300?5:price<700?10:25;
+  const center= Math.round(price/step)*step;
   const nodes = [];
   for(let i=-15;i<=15;i++){
     const strike = center+i*step;
-    // GEX calculation: negative near ATM (dealers short gamma), positive farther OTM
-    const dist = Math.abs(strike-price)/price;
+    const dist   = Math.abs(strike-price)/price;
     let gex = 0;
-    // King node slightly above current price
-    if(i===2) gex = -(r(8000,15000));       // Pika (yellow) — strong pin
-    else if(i===-3) gex = (r(5000,9000));    // Barney (purple) — explosion
-    else if(i===5) gex = -(r(3000,6000));    // Secondary pika
-    else if(i===-6) gex = (r(2000,4500));    // Secondary barney
-    else {
-      gex = (Math.random()-.5)*r(500,3000) * (1/(dist*10+1));
-    }
+    if     (i===2)  gex = -(r(8000,15000));
+    else if(i===-3) gex =   r(5000,9000);
+    else if(i===5)  gex = -(r(3000,6000));
+    else if(i===-6) gex =   r(2000,4500);
+    else            gex = (Math.random()-.5)*r(500,3000)*(1/(dist*10+1));
     const oi = ri(500,25000);
-    nodes.push({strike, gex: +gex.toFixed(0), oi, isKing:i===2, dist});
+    nodes.push({strike, gex:+gex.toFixed(0), oi, isKing:false, dist});
   }
+  // King Node: proximity-weighted |GEX| within ±8% of spot
+  let bestScore=-1, kingIdx=0;
+  nodes.forEach((n,i)=>{
+    if(n.dist>0.08) return;
+    const score = Math.abs(n.gex) * (1/(1+n.dist*20));
+    if(score>bestScore){ bestScore=score; kingIdx=i; }
+  });
+  if(bestScore<0){
+    let maxG=0;
+    nodes.forEach((n,i)=>{ if(Math.abs(n.gex)>maxG){maxG=Math.abs(n.gex);kingIdx=i;} });
+  }
+  nodes[kingIdx].isKing=true;
   return {price, step, nodes};
 }
 
@@ -70,11 +78,11 @@ function renderHeatCanvas() {
 
     let color;
     if(heatMode==='gex'){
-      if(node.gex<0){ // Pika — yellow (pin/absorb)
-        const intensity = Math.min(1, Math.abs(node.gex)/maxGex);
-        color=`rgba(253,224,71,${0.3+intensity*.7})`;
-      } else { // Barney — purple (amplify)
+      if(node.gex>=0){ // Pika — yellow (net long gamma = pin/absorb)
         const intensity = Math.min(1, node.gex/maxGex);
+        color=`rgba(253,224,71,${0.3+intensity*.7})`;
+      } else { // Barney — purple (net short gamma = amplify/explode)
+        const intensity = Math.min(1, Math.abs(node.gex)/maxGex);
         color=`rgba(168,85,247,${0.3+intensity*.7})`;
       }
     } else {
@@ -114,8 +122,8 @@ function renderHeatCanvas() {
   // Y-axis labels
   ctx.fillStyle='rgba(138,155,176,.5)'; ctx.font='9px IBM Plex Mono,monospace';
   ctx.textAlign='right';
-  ctx.fillText(heatMode==='oi'?'High OI':'Pika (Pin)', margin.left-6, zeroY-plotH*.4);
-  ctx.fillText(heatMode==='oi'?'Low OI':'Barney (Expl.)', margin.left-6, zeroY+plotH*.45);
+  ctx.fillText(heatMode==='oi'?'High OI':'Pika (Pin) ↑', margin.left-6, zeroY-plotH*.4);
+  ctx.fillText(heatMode==='oi'?'Low OI':'Barney (Expl.) ↓', margin.left-6, zeroY+plotH*.45);
 }
 
 function buildHeatTickerList() {
@@ -230,36 +238,64 @@ async function buildTrinityData(sym) {
     const { strike, c, p } = row;
     const atm = Math.abs(strike - price) < step * 0.7;
 
-    // GEX: gamma * OI * 100 * spot  (calls positive / puts negative for dealer)
-    // Dealers are short calls → long gamma on calls, short gamma on puts
-    const callGex =  (c.gamma || 0) * (c.oi || 0) * 100 * price;
-    const putGex  = -(p.gamma || 0) * (p.oi || 0) * 100 * price;
-    const gex     = callGex + putGex;
+    // ── GEX: Dealer Gamma Exposure ──
+    // Dealers are typically SHORT options (they sold them to customers).
+    // Short call = dealer is long gamma on that leg  → absorbs vol → Pika (pin).
+    // Short put  = dealer is long gamma on that leg  → absorbs vol → Pika.
+    // Net GEX > 0 means dealers net long gamma → they hedge in a stabilising way → Pika.
+    // Net GEX < 0 means dealers net short gamma → they hedge in a destabilising way → Barney.
+    // Formula: GEX = Σ(gamma × OI × 100 × spot) for calls MINUS puts
+    // (put gamma contribution is negative because put delta-hedge direction opposes call)
+    const callGex = (c.gamma || 0) * (c.oi || 0) * 100 * price;
+    const putGex  = (p.gamma || 0) * (p.oi || 0) * 100 * price;
+    const gex     = callGex - putGex;
+    // gex > 0  → net long gamma → PIKA  (pin / vol absorber)
+    // gex < 0  → net short gamma → BARNEY (explosion / vol amplifier)
 
-    // Vanna: approximated as delta * iv * oi
-    // Positive vanna → IV increase pushes dealer to buy more stock (bullish)
-    const callVanna =  (c.delta || 0) * (c.iv || 0) * (c.oi || 0);
-    const putVanna  =  (p.delta || 0) * (p.iv || 0) * (p.oi || 0);  // put delta is negative
-    const vanna     = (callVanna + putVanna) * 100;
+    // ── Vanna: Dealer Vanna Exposure ──
+    // Vanna = dDelta/dIV. Dealers SHORT options have NEGATIVE vanna exposure.
+    // When IV rises, dealers with short calls must SELL delta (bearish pressure).
+    // When IV rises, dealers with short puts must BUY delta (bullish pressure).
+    // Net dealer vanna = -(call_vanna) + (put_vanna)  [dealer is short both]
+    // Approximate vanna per contract: delta × (1 - |delta|) × OI
+    // Positive net dealer vanna → IV rise forces dealers to BUY → bullish.
+    const callVanna = (c.delta || 0) * (1 - Math.abs(c.delta || 0)) * (c.oi || 0);
+    const putVanna  = (p.delta || 0) * (1 - Math.abs(p.delta || 0)) * (p.oi || 0);
+    // dealer is short both → negate call vanna, put delta is already negative so putVanna is negative
+    const vanna     = (-callVanna - putVanna) * 1000;
+    // vanna > 0 → IV rise makes dealers buy stock → Vanna Bullish
+    // vanna < 0 → IV rise makes dealers sell stock → Vanna Bearish
 
-    // Charm: delta * (1 - |delta|) * OI — time-decay induced delta drift
-    // Near-ATM contracts have highest charm; decays toward 0 deep ITM/OTM
+    // ── Charm: Dealer Charm Exposure ──
+    // Charm = dDelta/dTime (theta of delta). As time passes, ATM delta drifts toward 0.5,
+    // OTM delta drifts toward 0. Dealers short options feel the opposite charm vs customers.
+    // Short call charm: as expiry nears, dealer needs to SELL delta (bearish pressure near ATM).
+    // Short put charm: as expiry nears, dealer needs to BUY delta (bullish pressure near ATM).
+    // Approximate: charm ≈ delta × (1 - |delta|) × OI  (same shape as vanna but time domain)
     const callCharm =  (c.delta || 0) * (1 - Math.abs(c.delta || 0)) * (c.oi || 0);
     const putCharm  =  (p.delta || 0) * (1 - Math.abs(p.delta || 0)) * (p.oi || 0);
-    const charm     = (callCharm + putCharm) * 1000;
+    const charm     = (-callCharm + putCharm) * 1000;
+    // charm > 0 → time decay forces dealers to BUY delta → upward drift
+    // charm < 0 → time decay forces dealers to SELL delta → downward drift
 
-    // DEX: net dealer delta exposure = delta * OI * 100
-    // Dealers are short calls (negative delta to hedge) and short puts (positive)
-    const callDex = -(c.delta || 0) * (c.oi || 0) * 100;  // dealer is short calls
-    const putDex  =  Math.abs(p.delta || 0) * (p.oi || 0) * 100;  // dealer is short puts
-    const dex     = callDex + putDex;
+    // ── DEX: Dealer Delta Exposure ──
+    // Dealers short calls must hold +delta hedge (they own stock against short calls).
+    // Dealers short puts must hold -delta hedge (they short stock against short puts).
+    // Net dealer DEX = (call_delta × call_OI) + (put_delta × put_OI)
+    // Call delta is positive → positive DEX (dealer long stock)
+    // Put delta is negative → negative DEX contribution (dealer short stock)
+    const dex = ((c.delta || 0) * (c.oi || 0) + (p.delta || 0) * (p.oi || 0)) * 100;
+    // dex > 0 → dealers net long stock → Long hedge bias (bullish support)
+    // dex < 0 → dealers net short stock → Short hedge bias (bearish pressure)
 
-    // Net Flow: (call premium - put premium) from today's volume
+    // ── Net Flow: Call premium minus Put premium (today's volume) ──
     const callMid  = ((c.bid || 0) + (c.ask || 0)) / 2;
     const putMid   = ((p.bid || 0) + (p.ask || 0)) / 2;
     const callFlow = callMid * (c.vol || 0) * 100;
     const putFlow  = putMid  * (p.vol || 0) * 100;
     const netFlow  = callFlow - putFlow;
+    // netFlow > 0 → more $ spent on calls → Bull Flow
+    // netFlow < 0 → more $ spent on puts  → Bear Flow
 
     nodes.push({
       strike,
@@ -277,9 +313,32 @@ async function buildTrinityData(sym) {
     });
   }
 
-  // Mark King Node: strike with the largest absolute GEX value
-  let maxAbsGex = 0, kingIdx = 0;
-  nodes.forEach((n, i) => { if (Math.abs(n.gex) > maxAbsGex) { maxAbsGex = Math.abs(n.gex); kingIdx = i; } });
+  // ── King Node algorithm ──
+  // The King Node is the strike with the strongest DEALER HEDGING PRESSURE
+  // near current price. Deep ITM strikes have large OI but negligible gamma
+  // (gamma peaks at ATM and decays sharply), so raw |GEX| max is wrong.
+  //
+  // Correct approach: score each strike by |GEX| * proximity_weight
+  // where proximity_weight = 1 / (1 + (|strike - price| / price) * 20)
+  // This down-weights strikes that are far OTM/ITM and emphasises the
+  // strikes where dealers are actively delta-hedging (ATM ± 2 strikes).
+  //
+  // Additionally, only consider strikes within ±8% of current price —
+  // beyond that, gamma is essentially zero and GEX values are noise.
+
+  let bestScore = -1, kingIdx = 0;
+  nodes.forEach((n, i) => {
+    const distPct = Math.abs(n.strike - price) / price;
+    if (distPct > 0.08) return;   // ignore far OTM/ITM
+    const proximity = 1 / (1 + distPct * 20);
+    const score = Math.abs(n.gex) * proximity;
+    if (score > bestScore) { bestScore = score; kingIdx = i; }
+  });
+  // Safety: if no strike within ±8% (e.g. very thin chain), fall back to max |GEX|
+  if (bestScore < 0) {
+    let maxAbsGex = 0;
+    nodes.forEach((n, i) => { if (Math.abs(n.gex) > maxAbsGex) { maxAbsGex = Math.abs(n.gex); kingIdx = i; } });
+  }
   nodes[kingIdx].isKing = true;
 
   // Compute composite score per node
@@ -289,10 +348,15 @@ async function buildTrinityData(sym) {
   const maxF = Math.max(...nodes.map(n => Math.abs(n.netFlow)))|| 1;
 
   nodes.forEach(n => {
-    const gN = -n.gex    / maxG;  // negative GEX = Pika = pin = neutral/bull
-    const vN =  n.vanna  / maxV;
-    const dN =  n.dex    / maxD;
-    const fN =  n.netFlow/ maxF;
+    // All signals: positive = bullish dealer pressure, negative = bearish
+    // GEX > 0 = Pika = dealers long gamma = stabilising = mild bull
+    // Vanna > 0 = IV rise forces dealers to buy = bullish
+    // DEX > 0 = dealers net long stock = support
+    // Flow > 0 = more call premium = bullish
+    const gN = n.gex     / maxG;
+    const vN = n.vanna   / maxV;
+    const dN = n.dex     / maxD;
+    const fN = n.netFlow / maxF;
     n.composite = gN * 0.35 + vN * 0.20 + dN * 0.30 + fN * 0.15;
   });
 
@@ -355,12 +419,14 @@ async function renderTrinity() {
 
     // GEX
     const gexPct   = Math.abs(n.gex) / maxGex;
-    const gexType  = n.gex < 0 ? 'Pika &#x1F7E1;' : 'Barney &#x1F7E3;';
-    const gexColor = n.gex < 0 ? 'var(--yellow)' : 'var(--purple)';
+    // gex > 0 = net long gamma = Pika (pin/absorb), gex < 0 = net short gamma = Barney (explode)
+    const gexType  = n.gex >= 0 ? 'Pika &#x1F7E1;' : 'Barney &#x1F7E3;';
+    const gexColor = n.gex >= 0 ? 'var(--yellow)' : 'var(--purple)';
     const gexBar   = mkBar(gexPct, BAR_MAX, gexColor);
 
     // Vanna
     const vannaPct   = Math.abs(n.vanna) / maxVanna;
+    // vanna > 0 = IV rise → dealers buy stock = bullish
     const vannaColor = n.vanna >= 0 ? 'var(--accent)' : 'var(--red)';
     const vannaBar   = mkBar(vannaPct, BAR_MAX, vannaColor);
     const charmPct   = Math.abs(n.charm) / maxCharm;
@@ -372,6 +438,8 @@ async function renderTrinity() {
     const dexPct   = Math.abs(n.dex) / maxDex;
     const dexColor = n.dex >= 0 ? 'var(--green)' : '#f97316';
     const dexBar   = mkBar(dexPct, BAR_MAX, dexColor);
+    // dex > 0 = dealers net long stock hedge = Long bias (upward support)
+    // dex < 0 = dealers net short stock hedge = Short bias (downward pressure)
     const dexBias  = n.dex >= 0
       ? '<span class="up">Long &#x2191;</span>'
       : '<span style="color:#f97316">Short &#x2193;</span>';
@@ -425,11 +493,13 @@ function fmtN(v) {
 }
 
 function vcSignal(vanna, charm) {
+  // vanna > 0: IV rise forces dealers to BUY (bullish pressure)
+  // charm > 0: time decay forces dealers to BUY (upward drift)
   const v = vanna >= 0, c = charm >= 0;
   if (v && c)   return '<span class="up" style="font-size:10px">&#x2191; Bullish</span>';
   if (!v && !c) return '<span class="dn" style="font-size:10px">&#x2193; Bearish</span>';
-  if (v && !c)  return '<span style="color:var(--amber);font-size:10px">&#x2192; Mixed&#x2191;</span>';
-  return '<span style="color:var(--amber);font-size:10px">&#x2192; Mixed&#x2193;</span>';
+  if (v && !c)  return '<span style="color:var(--amber);font-size:10px">&#x2192; Vanna&#x2191;</span>';
+  return '<span style="color:var(--amber);font-size:10px">&#x2192; Charm&#x2191;</span>';
 }
 
 function compositeSignal(c) {
